@@ -1,11 +1,13 @@
 name: CI
+permissions:
+  contents: read
 on: [push, pull_request]
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20, 22]
+        node-version: [22, 24, 26]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,16 +24,33 @@ jobs:
           RC=$?
           set -e
           # Exit code 124 means timeout killed the process (vitest hung after tests completed)
-          if [ $RC -eq 124 ]; then echo "::warning::vitest process hung after tests, killed by timeout"; exit 0; fi
+          if [ $RC -eq 124 ]; then echo "::error::Test runner timed out; CI verification is incomplete"; exit 124; fi
           exit $RC
       - name: Run security tests
         timeout-minutes: 10
         run: |
           set +e
-          timeout 180 pnpm test -- --grep "security|injection|policy|financial"
+          timeout 180 pnpm exec vitest run \
+            src/__tests__/authority-rules.test.ts \
+            src/__tests__/command-injection.test.ts \
+            src/__tests__/context-hardening.test.ts \
+            src/__tests__/injection-defense.test.ts \
+            src/__tests__/path-protection.test.ts \
+            src/__tests__/policy-engine.test.ts \
+            src/__tests__/tools-security.test.ts \
+            src/__tests__/skills-hardening.test.ts \
+            src/__tests__/financial.test.ts \
+            src/__tests__/conway-local-security.test.ts \
+            src/__tests__/local-dispatch-security.test.ts \
+            src/__tests__/loop.test.ts \
+            src/__tests__/host-mutation-security.test.ts \
+            src/__tests__/python-syntax-validator.test.ts \
+            src/__tests__/agent/coding-harness.test.ts \
+            src/__tests__/agent/general-harness.test.ts \
+            src/__tests__/orchestration/local-worker-security.test.ts
           RC=$?
           set -e
-          if [ $RC -eq 124 ]; then echo "::warning::vitest process hung after tests, killed by timeout"; exit 0; fi
+          if [ $RC -eq 124 ]; then echo "::error::Test runner timed out; CI verification is incomplete"; exit 124; fi
           exit $RC
 
   security-audit:
@@ -43,4 +62,7 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm audit --audit-level=high || true
+      - name: Audit production dependencies (blocking)
+        run: pnpm audit --prod --audit-level=high
+      - name: Audit development dependencies (blocking)
+        run: pnpm audit --audit-level=high

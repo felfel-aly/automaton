@@ -14,6 +14,9 @@ const REPO_ROOT = process.cwd();
  * Run a git command using execFileSync with argument array (no shell interpolation).
  */
 function git(args: string[]): string {
+  if (process.env.CONWAY_HOST_MUTATION_ENABLED !== "1") {
+    throw new Error("Conway host Git access is disabled: explicit operator approval is required.");
+  }
   return execFileSync("git", args, {
     cwd: REPO_ROOT,
     encoding: "utf-8",

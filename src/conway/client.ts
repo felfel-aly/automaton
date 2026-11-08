@@ -6,9 +6,7 @@
  * Adapted from @aiws/sdk patterns.
  */
 
-import { execSync } from "child_process";
-import fs from "fs";
-import nodePath from "path";
+import { execInLocalSandbox, readLocalWorkspaceFile, writeLocalWorkspaceFile } from "./local-security.js";
 import type {
   ConwayClient,
   ExecResult,
@@ -33,6 +31,8 @@ interface ConwayClientOptions {
   apiUrl: string;
   apiKey: string;
   sandboxId: string;
+  localWorkspaceRoot?: string;
+  localExecEnabled?: boolean;
 }
 
 export function createConwayClient(options: ConwayClientOptions): ConwayClient {
@@ -40,7 +40,8 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   // Normalize sandbox ID defensively so values like whitespace/"undefined"/"null"
   // never produce malformed API paths such as /v1/sandboxes//exec.
   const sandboxId = normalizeSandboxId(options.sandboxId);
-  const httpClient = new ResilientHttpClient();
+  // Permit HTTP only to loopback for the unfunded local Ollama-backed runtime.
+  const httpClient = new ResilientHttpClient({ allowHttpOnLoopback: true });
 
   async function request(
     method: string,
@@ -104,27 +105,14 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
 
 
   // ─── Sandbox Operations (own sandbox) ────────────────────────
-  // When sandboxId is empty, automatically fall back to local execution.
+  // Empty sandbox ID selects scoped local mode; never an unsandboxed host shell.
 
   const isLocal = !sandboxId;
+  const localWorkspaceRoot = options.localWorkspaceRoot ?? process.env.CONWAY_LOCAL_WORKSPACE_ROOT;
+  const localExecEnabled = options.localExecEnabled ?? (process.env.CONWAY_LOCAL_EXEC_ENABLED === "1");
 
-  const execLocal = (command: string, timeout?: number): ExecResult => {
-    try {
-      const stdout = execSync(command, {
-        timeout: timeout || 30_000,
-        encoding: "utf-8",
-        maxBuffer: 10 * 1024 * 1024,
-        cwd: process.env.HOME || "/root",
-      });
-      return { stdout: stdout || "", stderr: "", exitCode: 0 };
-    } catch (err: any) {
-      return {
-        stdout: err.stdout || "",
-        stderr: err.stderr || err.message || "",
-        exitCode: err.status ?? 1,
-      };
-    }
-  };
+  const execLocal = (command: string, timeout?: number): ExecResult =>
+    execInLocalSandbox(command, localWorkspaceRoot, localExecEnabled, timeout);
 
   const exec = async (
     command: string,
@@ -163,22 +151,12 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     }
   };
 
-  const resolveLocalPath = (filePath: string): string =>
-    filePath.startsWith("~")
-      ? nodePath.join(process.env.HOME || "/root", filePath.slice(1))
-      : filePath;
-
   const writeFile = async (
     filePath: string,
     content: string,
   ): Promise<void> => {
     if (isLocal) {
-      const resolved = resolveLocalPath(filePath);
-      const dir = nodePath.dirname(resolved);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      fs.writeFileSync(resolved, content, "utf-8");
+      writeLocalWorkspaceFile(localWorkspaceRoot, filePath, content);
       return;
     }
     try {
@@ -200,7 +178,7 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
 
   const readFile = async (filePath: string): Promise<string> => {
     if (isLocal) {
-      return fs.readFileSync(resolveLocalPath(filePath), "utf-8");
+      return readLocalWorkspaceFile(localWorkspaceRoot, filePath);
     }
     try {
       const result = await request(
@@ -576,7 +554,12 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
   };
 
   const createScopedClient = (targetSandboxId: string): ConwayClient => {
-    return createConwayClient({ apiUrl, apiKey, sandboxId: targetSandboxId });
+    // A missing remote sandbox ID must never silently select local mode.
+    const remoteSandboxId = normalizeSandboxId(targetSandboxId);
+    if (!remoteSandboxId) {
+      throw new Error("Cannot create a remote scoped client without a valid sandbox ID.");
+    }
+    return createConwayClient({ apiUrl, apiKey, sandboxId: remoteSandboxId });
   };
 
   const client: ConwayClient = {
@@ -600,6 +583,13 @@ export function createConwayClient(options: ConwayClientOptions): ConwayClient {
     listModels,
     createScopedClient,
   };
+
+  Object.defineProperty(client, "sandboxId", {
+    value: sandboxId,
+    enumerable: false,
+    writable: false,
+    configurable: false,
+  });
 
   // SECURITY: API credentials are NOT exposed on the client object.
   // If child spawning or other modules need API configuration, pass it

@@ -6,6 +6,9 @@
  */
 
 import nodePath from "node:path";
+import nodeFs from "node:fs";
+import { isValidPythonSyntax } from "./python-syntax-validator.js";
+import { requireApprovedLocalRoot } from "../conway/local-security.js";
 import { ulid } from "ulid";
 import type {
   AutomatonTool,
@@ -56,6 +59,73 @@ const EXTERNAL_SOURCE_TOOLS = new Set([
   "web_fetch",
   "check_social_inbox",
 ]);
+
+// Fail closed if either source of sandbox identity is missing.
+// Inference provider configuration is not an execution permission.
+function isLocalToolContext(ctx: ToolContext): boolean {
+  return !ctx.identity.sandboxId || !ctx.config.sandboxId;
+}
+
+// The LLM sees /root/work, matching the remote sandbox layout, but WSL
+// local mode only uses a dedicated owner-approved directory. Never access
+// the literal host /root/work or pass virtual paths to localConway.writeFile.
+const LOCAL_VIRTUAL_ROOT = "/root/work";
+export const LOCAL_DRAFT_QUEUE = [
+  "/root/work/service-offer.md", "/root/work/demo-plan.md",
+  "/root/work/demo-code.md", "/root/work/demo-test-plan.md",
+  "/root/work/portfolio-summary.md",
+] as const;
+
+const LOCAL_DRAFT_NAMES = new Set(
+  LOCAL_DRAFT_QUEUE.map((filePath) => nodePath.posix.basename(filePath)),
+);
+
+/**
+ * Check the same approved physical root used by local write_file.
+ * A missing, unsafe, or non-regular queue entry must never be accepted
+ * as a completed draft.
+ */
+export function hasPendingLocalDrafts(): boolean {
+  let approvedRoot: string;
+  try {
+    approvedRoot = requireApprovedLocalRoot(process.env.CONWAY_LOCAL_WORKSPACE_ROOT);
+  } catch {
+    return true;
+  }
+  for (const virtualPath of LOCAL_DRAFT_QUEUE) {
+    try {
+      const actual = nodePath.join(approvedRoot, nodePath.posix.basename(virtualPath));
+      const stat = nodeFs.lstatSync(actual);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+          (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+        return true;
+      }
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+function confineLocalWorkPath(filePath: string): string | { error: string } {
+  if (typeof filePath !== "string" || !nodePath.posix.isAbsolute(filePath)) {
+    return { error: "Blocked: only absolute paths under /root/work are allowed" };
+  }
+  const normalized = nodePath.posix.resolve(filePath);
+  if (!normalized.startsWith(LOCAL_VIRTUAL_ROOT + "/")) {
+    return { error: "Blocked: path is outside /root/work" };
+  }
+  const basename = normalized.slice(LOCAL_VIRTUAL_ROOT.length + 1);
+  if (basename.includes("/") || !LOCAL_DRAFT_NAMES.has(basename)) {
+    return { error: "Blocked: path is not an approved local draft file" };
+  }
+  try {
+    const approvedRoot = requireApprovedLocalRoot(process.env.CONWAY_LOCAL_WORKSPACE_ROOT);
+    return nodePath.join(approvedRoot, basename);
+  } catch {
+    return { error: "Blocked: approved local workspace is missing or unsafe" };
+  }
+}
 
 // ─── Self-Preservation Guard ───────────────────────────────────
 // Defense-in-depth: policy engine (command.forbidden_patterns rule) is the primary guard.
@@ -158,6 +228,15 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
       },
       execute: async (args, ctx) => {
         const filePath = args.path as string;
+        if (ctx.identity.sandboxId !== ctx.config.sandboxId) {
+          return "Blocked: sandbox configuration and identity disagree.";
+        }
+        let localTarget: string | undefined;
+        if (isLocalToolContext(ctx)) {
+          const localPath = confineLocalWorkPath(filePath);
+          if (typeof localPath === "object") return localPath.error;
+          localTarget = localPath;
+        }
         // Path confinement: restrict writes to sandbox home directory
         const confined = confinePathToSandbox(filePath);
         if (typeof confined === "object") return confined.error;
@@ -166,7 +245,87 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
         if (isProtectedFile(confined)) {
           return "Blocked: Cannot overwrite protected file. This is a hard-coded safety invariant.";
         }
-        await ctx.conway.writeFile(confined, args.content as string);
+        if (localTarget) {
+          try {
+            const existing = nodeFs.lstatSync(localTarget);
+            if (!existing.isFile() || existing.isSymbolicLink() ||
+                existing.nlink !== 1 ||
+                (typeof process.getuid === "function" && existing.uid !== process.getuid())) {
+              return "Blocked: local deliverable path is not a safe regular file.";
+            }
+            return "Blocked: local deliverable already exists. Write a uniquely named new file.";
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+              return "Blocked: local deliverable path cannot be inspected.";
+            }
+          }
+        }
+        if (isLocalToolContext(ctx)) {
+          const workQueue = LOCAL_DRAFT_QUEUE;
+          const physicalRoot = nodePath.dirname(localTarget!);
+          let expected: string | undefined;
+          for (const candidate of workQueue) {
+            const actual = nodePath.join(physicalRoot, nodePath.posix.basename(candidate));
+            try {
+              const stat = nodeFs.lstatSync(actual);
+              if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 ||
+                  (typeof process.getuid === "function" && stat.uid !== process.getuid())) {
+                return "Blocked: local draft queue contains an unsafe entry.";
+              }
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+                expected = candidate;
+                break;
+              }
+              return "Blocked: local draft queue cannot be inspected.";
+            }
+          }
+          if (!expected) return "Blocked: approved local task queue is complete.";
+          if (confined !== expected) {
+            return "Blocked: the only authorized new deliverable is " + expected;
+          }
+        }
+        if (isLocalToolContext(ctx)) {
+          const body = args.content;
+          if (typeof body !== "string" || body.length < 100 || body.length > 6000) {
+            return "Blocked: deliverable must be 100 to 6000 characters of original content.";
+          }
+          if (/we(?:'|’)ve helped\s+\d+|we have helped\s+\d+|guarantee(?:d)?\s+\d+%/i.test(body)) {
+            return "Blocked: unsupported client-success or performance claim. Write factual drafts only.";
+          }
+          if (confined.endsWith("/demo-code.md")) {
+            const fence = String.fromCharCode(96).repeat(3);
+            const beginning = body.indexOf(fence + "python");
+            const start = beginning >= 0 ? beginning + fence.length + 6 : -1;
+            const ending = start >= 0 ? body.indexOf(fence, start) : -1;
+            const snippet = ending >= 0 ? body.slice(start, ending).trim() : "";
+            if (!snippet || snippet.length < 85 ||
+                !/\bimport\s+tracemalloc\b/.test(snippet) ||
+                !/\btracemalloc\.start\s*\(/.test(snippet) ||
+                !/\btracemalloc\.take_snapshot\s*\(/.test(snippet) ||
+                !/\.statistics\s*\(\s*["']lineno["']\s*\)/.test(snippet) ||
+                !/\bprint\s*\(/.test(snippet) ||
+                /tracemalloc\.get_snapshot\s*\(/.test(snippet)) {
+              return "Blocked: code must import tracemalloc, start it, take a snapshot, print valid lineno statistics, and use no invalid get_snapshot API.";
+            }
+            if (!isValidPythonSyntax(snippet)) {
+              return "Blocked: Python demo failed static syntax validation.";
+            }
+          }
+          if (confined.endsWith("/demo-test-plan.md")) {
+            const cases = body.split(/\btest\s+[123]\b/i).slice(1);
+            if (cases.length !== 3 || cases.some((text) =>
+                !/\b(python|tracemalloc|memory|allocation|snapshot|leak)\b/i.test(text) ||
+                !/\bexpected\b/i.test(text))) {
+              return "Blocked: Test 1, Test 2 and Test 3 must each describe a Python memory test with an expected result.";
+            }
+          }
+          if (confined.endsWith("/portfolio-summary.md") &&
+              !/\bdraft\b/i.test(body)) {
+            return "Blocked: portfolio must mark the work as a draft.";
+          }
+        }
+        await ctx.conway.writeFile(localTarget ?? confined, args.content as string);
         return `File written: ${confined}`;
       },
     },
@@ -184,6 +343,15 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
       },
       execute: async (args, ctx) => {
         const filePath = args.path as string;
+        if (ctx.identity.sandboxId !== ctx.config.sandboxId) {
+          return "Blocked: sandbox configuration and identity disagree.";
+        }
+        let localTarget: string | undefined;
+        if (isLocalToolContext(ctx)) {
+          const localPath = confineLocalWorkPath(filePath);
+          if (typeof localPath === "object") return localPath.error;
+          localTarget = localPath;
+        }
         // Block reads of sensitive files (wallet, env, config secrets)
         const basename = filePath.split("/").pop() || "";
         const sensitiveFiles = ["wallet.json", ".env", "automaton.json"];
@@ -196,17 +364,10 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
           return "Blocked: Cannot read sensitive file. This protects credentials and secrets.";
         }
         try {
-          return await ctx.conway.readFile(filePath);
+          return await ctx.conway.readFile(localTarget ?? filePath);
         } catch {
-          // Conway files/read API may be broken — fall back to exec(cat)
-          const result = await ctx.conway.exec(
-            `cat ${escapeShellArg(filePath)}`,
-            30_000,
-          );
-          if (result.exitCode !== 0) {
-            return `ERROR: File not found or not readable: ${filePath}`;
-          }
-          return result.stdout;
+          // A remote read failure must not become an alternate shell operation.
+          return "ERROR: Remote sandbox file read failed; no exec fallback was attempted.";
         }
       },
     },
@@ -3316,6 +3477,41 @@ export async function executeTool(
     };
   }
 
+  // Enforce local-mode capabilities at dispatch, even if a caller provides
+  // extra tools or a policy engine was not installed.
+  const localToolNames = new Set([
+    "read_file", "write_file", "sleep", "check_credits", "system_synopsis",
+    "remember_fact", "recall_facts",
+  ]);
+  if (isLocalToolContext(context) && !localToolNames.has(toolName)) {
+    return {
+      id: ulid(),
+      name: toolName,
+      arguments: args,
+      result: "",
+      durationMs: Date.now() - startTime,
+      error: "Policy denied: LOCAL_MODE_CAPABILITY_DISABLED",
+    };
+  }
+
+  // Trust no tool dispatch whose execution identity disagrees with the
+  // configured or client-bound sandbox ID. This also catches local/remote
+  // normalization mismatches and blocks execution without a policy engine.
+  const identitySandbox = context.identity.sandboxId || "";
+  const configuredSandbox = context.config.sandboxId || "";
+  const boundSandbox = context.conway?.sandboxId;
+  if (identitySandbox !== configuredSandbox ||
+      (typeof boundSandbox === "string" && boundSandbox !== configuredSandbox)) {
+    return {
+      id: ulid(),
+      name: toolName,
+      arguments: args,
+      result: "",
+      durationMs: Date.now() - startTime,
+      error: "Policy denied: SANDBOX_ID_MISMATCH",
+    };
+  }
+
   // Policy evaluation (if engine is provided)
   if (policyEngine && turnContext) {
     const request: PolicyRequest = {
@@ -3337,6 +3533,24 @@ export async function executeTool(
         error: `Policy denied: ${decision.reasonCode} — ${decision.humanMessage}`,
       };
     }
+  }
+
+  // These tools mutate or inspect the host Git checkout or skill registry,
+  // bypassing the remote sandbox even when VM execution is confined.
+  const hostMutationTools = new Set([
+    "install_skill", "create_skill", "remove_skill",
+    "review_upstream_changes", "pull_upstream",
+  ]);
+  if (hostMutationTools.has(toolName) &&
+      process.env.CONWAY_HOST_MUTATION_ENABLED !== "1") {
+    return {
+      id: ulid(),
+      name: toolName,
+      arguments: args,
+      result: "",
+      durationMs: Date.now() - startTime,
+      error: "Policy denied: HOST_MUTATION_CAPABILITY_DISABLED",
+    };
   }
 
   try {

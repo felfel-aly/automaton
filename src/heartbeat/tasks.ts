@@ -274,6 +274,12 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
   },
 
   check_for_updates: async (_ctx: TickContext, taskCtx: HeartbeatLegacyContext) => {
+    // Host Git fetch must be separately approved and never runs implicitly
+    // in local mode, even when Ollama is not configured.
+    if (!taskCtx.identity.sandboxId || !taskCtx.config.sandboxId ||
+        process.env.CONWAY_HOST_MUTATION_ENABLED !== "1") {
+      return { shouldWake: false };
+    }
     try {
       const { checkUpstream, getRepoInfo } = await import("../self-mod/upstream.js");
       const repo = getRepoInfo();

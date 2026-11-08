@@ -29,6 +29,24 @@ export const MAX_TOOL_RESULT_SIZE = 10_000;
 export type { TokenBudget };
 export { DEFAULT_TOKEN_BUDGET };
 
+// js-tiktoken's BPE can be quadratic for whitespace-free input. This
+// guard is evaluated on short strings as well as long messages, including
+// adversarial tool output and text from external sources.
+const MAX_EXACT_TOKEN_RUN = 1_000;
+function hasPathologicalUnbrokenRun(content: string): boolean {
+  let run = 0;
+  for (let i = 0; i < content.length; i++) {
+    const code = content.charCodeAt(i);
+    // ASCII whitespace recognized by the BPE pre-tokenizer.
+    if (code === 32 || (code >= 9 && code <= 13)) {
+      run = 0;
+    } else if (++run > MAX_EXACT_TOKEN_RUN) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Estimate token count from text length.
  * Conservative estimate: ~4 characters per token for English text.
@@ -36,6 +54,14 @@ export { DEFAULT_TOKEN_BUDGET };
 export function estimateTokens(text: string): number {
   const content = text ?? "";
   const legacyEstimate = Math.ceil(content.length / 4);
+  // Large repetitive inputs can make exact tokenization pathologically slow.
+  // Keep context budget enforcement bounded with a conservative 3-char/token
+  // estimate for long text. Small inputs retain exact counting behavior.
+  if (content.length > 8192 || hasPathologicalUnbrokenRun(content)) {
+    // UTF-8 byte length is a safe upper bound on BPE token count.
+    // length/3 can underestimate punctuation-heavy and multilingual input.
+    return Buffer.byteLength(content, "utf8");
+  }
   try {
     if (!tokenCounter) {
       tokenCounter = createTokenCounter();
@@ -163,8 +189,9 @@ export function buildContextMessages(
       });
     }
 
-    // The agent's thinking as assistant message
-    if (turn.thinking) {
+    // Tool-only assistant responses often have empty text. Keep their
+    // tool_calls and resulting success/errors in context nonetheless.
+    if (turn.thinking || turn.toolCalls.length > 0) {
       const msg: ChatMessage = {
         role: "assistant",
         content: turn.thinking,

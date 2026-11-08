@@ -64,6 +64,17 @@ describe("estimateTokens", () => {
     expect(estimateTokens("x".repeat(101))).toBe(26);
   });
 
+  it("bounds tokenizer work even for unbroken runs below the long-message threshold", () => {
+    const repetitive = "a".repeat(2_048);
+    expect(estimateTokens(repetitive)).toBe(Buffer.byteLength(repetitive));
+    const tokenDense = "1,".repeat(1024);
+    expect(estimateTokens(tokenDense)).toBe(Buffer.byteLength(tokenDense));
+    const unicodeRun = "汉".repeat(1024);
+    expect(estimateTokens(unicodeRun)).toBe(Buffer.byteLength(unicodeRun));
+    const mixed = "ordinary text ".repeat(200);
+    expect(estimateTokens(mixed)).toBeGreaterThan(0);
+  });
+
   it("handles empty string as zero tokens", () => {
     expect(estimateTokens("")).toBe(0);
   });
