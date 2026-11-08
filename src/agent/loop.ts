@@ -33,6 +33,7 @@ import {
   loadInstalledTools,
   toolsToInferenceFormat,
   executeTool,
+  hasPendingLocalDrafts,
 } from "./tools.js";
 import { sanitizeInput } from "./injection-defense.js";
 import { getSurvivalTier } from "../conway/credits.js";
@@ -96,9 +97,25 @@ export async function runAgentLoop(
   const { identity, config, db, conway, inference, social, skills, policyEngine, spendTracker, onStateChange, onTurnComplete, ollamaBaseUrl } =
     options;
 
+  // Local-only capability boundary. Filter the EXECUTABLE tool set,
+  // not merely the function descriptions sent to the model.
+  const localOnly = !identity.sandboxId || !config.sandboxId;
+  // Local drafts are stored in the explicitly approved physical workspace.
+  // Re-evaluate the queue before every turn; the permitted tool set changes
+  // after the final draft has been successfully written.
+  const toolsWhileDrafting = new Set(["write_file"]);
+  const toolsAfterDrafting = new Set([
+    "read_file", "sleep", "check_credits", "system_synopsis",
+    "remember_fact", "recall_facts",
+  ]);
   const builtinTools = createBuiltinTools(identity.sandboxId);
-  const installedTools = loadInstalledTools(db);
-  const tools = [...builtinTools, ...installedTools];
+  const installedTools = localOnly ? [] : loadInstalledTools(db);
+  const availableTools = [...builtinTools, ...installedTools];
+  let localWorkPending = localOnly && hasPendingLocalDrafts();
+  let localAllowedTools = localWorkPending ? toolsWhileDrafting : toolsAfterDrafting;
+  let tools = localOnly
+    ? availableTools.filter((tool) => localAllowedTools.has(tool.name))
+    : availableTools;
   const toolContext: ToolContext = {
     identity,
     config,
@@ -129,7 +146,10 @@ export async function runAgentLoop(
   let orchestrator: Orchestrator | undefined;
   let workerPool: LocalWorkerPool | undefined;
 
-  if (hasTable(db.raw, "goals")) {
+  // Local file-production mode has no approval to spawn/fund children.
+  // Parent orchestration can create sandboxes and trigger credit top-ups,
+  // so require an explicitly configured remote sandbox before bootstrapping.
+  if (!localOnly && hasTable(db.raw, "goals")) {
     try {
       planModeController = new PlanModeController(db.raw);
 
@@ -395,6 +415,15 @@ export async function runAgentLoop(
     let claimedMessages: InboxMessageRow[] = [];
 
     try {
+      if (localOnly) {
+        const pendingNow = hasPendingLocalDrafts();
+        if (pendingNow !== localWorkPending) {
+          localWorkPending = pendingNow;
+          localAllowedTools = pendingNow ? toolsWhileDrafting : toolsAfterDrafting;
+          tools = availableTools.filter((tool) => localAllowedTools.has(tool.name));
+        }
+      }
+
       // Check if we should be sleeping
       const sleepUntil = db.getKV("sleep_until");
       if (sleepUntil && new Date(sleepUntil) > new Date()) {
@@ -441,7 +470,9 @@ export async function runAgentLoop(
         // available, buy credits NOW — before attempting inference.
         // This prevents the agent from dying mid-loop while waiting for
         // the heartbeat to fire. Uses a 60s cooldown to avoid hammering.
-        if ((tier === "critical" || tier === "low_compute") && financial.usdcBalance >= 5) {
+        if (!localOnly &&
+            (tier === "critical" || tier === "low_compute") &&
+            financial.usdcBalance >= 5) {
           const INLINE_TOPUP_COOLDOWN_MS = 60_000;
           const lastInlineTopup = db.getKV("last_inline_topup_attempt");
           const cooldownExpired = !lastInlineTopup ||
@@ -498,9 +529,13 @@ export async function runAgentLoop(
         return t.toolCalls.some((tc) => !isIdleOnlyTool(tc.name));
       });
       // Keep at least the last 2 turns for continuity, even if idle
-      const recentTurns = trimContext(
-        meaningfulTurns.length > 0 ? meaningfulTurns : allTurns.slice(-2),
-      );
+      const recentTurns = localWorkPending
+        // Preserve the last draft attempts (including validation errors and
+        // write confirmations) while omitting unrelated status-check chatter.
+        ? trimContext(allTurns.filter((turn) =>
+            turn.toolCalls.some((tc) => tc.name === "write_file"),
+          ).slice(-3))
+        : trimContext(meaningfulTurns.length > 0 ? meaningfulTurns : allTurns.slice(-2));
       const systemPrompt = buildSystemPrompt({
         identity,
         config,
@@ -533,7 +568,7 @@ export async function runAgentLoop(
       );
 
       // Inject memory block after system prompt, before conversation history
-      if (memoryBlock) {
+      if (memoryBlock && !localWorkPending) {
         messages.splice(1, 0, { role: "system", content: memoryBlock });
       }
 
@@ -576,7 +611,7 @@ export async function runAgentLoop(
         }
       }
 
-      if (planModeController) {
+      if (planModeController && !localWorkPending) {
         try {
           const todoMd = generateTodoMd(db.raw);
           messages = injectTodoContext(messages, todoMd);
@@ -599,7 +634,15 @@ export async function runAgentLoop(
       const survivalTier = getSurvivalTier(financial.creditsCents);
       log(config, `[THINK] Routing inference (tier: ${survivalTier}, model: ${inference.getDefaultModel()})...`);
 
-      const inferenceTools = toolsToInferenceFormat(tools);
+      // Keep the original tool executor and policy engine intact, but present
+      // a focused tool menu to CPU-sized local LLMs to fit their context window.
+      // Hosted mode still receives every original capability.
+      const localToolNames = localAllowedTools;
+      const inferenceTools = toolsToInferenceFormat(
+        localOnly
+          ? tools.filter((tool) => localToolNames.has(tool.name))
+          : tools,
+      );
       const routerResult = await inferenceRouter.route(
         {
           messages: messages,

@@ -355,6 +355,8 @@ export interface InferenceToolDefinition {
 // ─── Conway Client ───────────────────────────────────────────────
 
 export interface ConwayClient {
+  /** Immutable sandbox identity for clients constructed by createConwayClient. */
+  readonly sandboxId?: string;
   exec(command: string, timeout?: number): Promise<ExecResult>;
   writeFile(path: string, content: string): Promise<void>;
   readFile(path: string): Promise<string>;

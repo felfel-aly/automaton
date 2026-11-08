@@ -313,7 +313,7 @@ describe("read_file sensitive file blocking", () => {
 
 // ─── read_file Fallback Shell Injection Prevention ───────────────
 
-describe("read_file fallback shell escaping", () => {
+describe("read_file failure must not execute a fallback shell", () => {
   let tools: AutomatonTool[];
   let ctx: ToolContext;
   let db: AutomatonDatabase;
@@ -336,49 +336,19 @@ describe("read_file fallback shell escaping", () => {
     db.close();
   });
 
-  it("escapes shell metacharacters in fallback cat command", async () => {
-    const readTool = tools.find((t) => t.name === "read_file")!;
-    // Make readFile throw so the fallback exec(cat) path is triggered
+  it.each([
+    ["space-containing path", "/home/user/my file.txt"],
+    ["semicolon injection", "foo; cat /etc/passwd"],
+    ["single quote", "it's a file.txt"],
+    ["subshell injection", "$(whoami).txt"],
+  ])("does not execute a shell for %s", async (_scenario, filePath) => {
+    const readTool = tools.find((tool) => tool.name === "read_file")!;
     vi.spyOn(conway, "readFile").mockRejectedValue(new Error("API broken"));
 
-    await readTool.execute({ path: "/home/user/my file.txt" }, ctx);
+    const output = await readTool.execute({ path: filePath }, ctx);
 
-    expect(conway.execCalls.length).toBe(1);
-    // The path should be wrapped in single quotes by escapeShellArg
-    expect(conway.execCalls[0].command).toBe("cat '/home/user/my file.txt'");
-  });
-
-  it("prevents command injection via semicolons in fallback path", async () => {
-    const readTool = tools.find((t) => t.name === "read_file")!;
-    vi.spyOn(conway, "readFile").mockRejectedValue(new Error("API broken"));
-
-    await readTool.execute({ path: "foo; cat /etc/passwd" }, ctx);
-
-    expect(conway.execCalls.length).toBe(1);
-    // Semicolons inside single quotes are treated as literal characters
-    expect(conway.execCalls[0].command).toBe("cat 'foo; cat /etc/passwd'");
-  });
-
-  it("escapes single quotes in file path in fallback", async () => {
-    const readTool = tools.find((t) => t.name === "read_file")!;
-    vi.spyOn(conway, "readFile").mockRejectedValue(new Error("API broken"));
-
-    await readTool.execute({ path: "it's a file.txt" }, ctx);
-
-    expect(conway.execCalls.length).toBe(1);
-    // Single quotes are escaped using the '\'' technique
-    expect(conway.execCalls[0].command).toBe("cat 'it'\\''s a file.txt'");
-  });
-
-  it("prevents subshell injection via $() in fallback path", async () => {
-    const readTool = tools.find((t) => t.name === "read_file")!;
-    vi.spyOn(conway, "readFile").mockRejectedValue(new Error("API broken"));
-
-    await readTool.execute({ path: "$(whoami).txt" }, ctx);
-
-    expect(conway.execCalls.length).toBe(1);
-    // $() inside single quotes is treated as literal text
-    expect(conway.execCalls[0].command).toBe("cat '$(whoami).txt'");
+    expect(output).toContain("Remote sandbox file read failed");
+    expect(conway.execCalls).toHaveLength(0);
   });
 });
 

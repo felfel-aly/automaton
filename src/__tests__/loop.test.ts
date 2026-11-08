@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { runAgentLoop } from "../agent/loop.js";
 import { Orchestrator } from "../orchestration/orchestrator.js";
 import {
@@ -34,7 +37,70 @@ describe("Agent Loop", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     db.close();
+  });
+
+  it("refreshes local draft capabilities when the final approved draft is written", async () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "conway-loop-local-"));
+    const root = path.join(fixture, "approved");
+    fs.mkdirSync(root, { mode: 0o700 });
+    vi.stubEnv("CONWAY_LOCAL_WORKSPACE_ROOT", root);
+    const names = [
+      "service-offer.md", "demo-plan.md", "demo-code.md", "demo-test-plan.md",
+    ];
+    for (const name of names) fs.writeFileSync(path.join(root, name), "draft", { mode: 0o600 });
+
+    identity = { ...identity, sandboxId: "" };
+    config = { ...config, sandboxId: "", ollamaBaseUrl: undefined, maxTurnsPerCycle: 2 };
+    conway.writeFile = async (filePath, content) => {
+      fs.writeFileSync(filePath, content, { flag: "wx", mode: 0o600 });
+    };
+    const content = "This is a factual draft portfolio summary for review. ".repeat(3);
+    const inference = new MockInferenceClient([
+      toolCallResponse([
+        { name: "write_file", arguments: { path: "/root/work/portfolio-summary.md", content } },
+      ]),
+      noToolResponse("Drafts completed."),
+    ]);
+    try {
+      await runAgentLoop({ identity, config, db, conway, inference });
+      expect(fs.readFileSync(path.join(root, "portfolio-summary.md"), "utf8")).toBe(content);
+      expect(inference.calls.length).toBeGreaterThanOrEqual(2);
+      const firstTools = inference.calls[0].options?.tools?.map((tool) => tool.function.name);
+      const secondTools = inference.calls[1].options?.tools?.map((tool) => tool.function.name);
+      expect(firstTools).toEqual(["write_file"]);
+      expect(secondTools).toContain("read_file");
+      expect(secondTools).toContain("sleep");
+      expect(secondTools).not.toContain("exec");
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves local write validation errors for the following draft turn", async () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "conway-loop-feedback-"));
+    const root = path.join(fixture, "approved");
+    fs.mkdirSync(root, { mode: 0o700 });
+    vi.stubEnv("CONWAY_LOCAL_WORKSPACE_ROOT", root);
+    identity = { ...identity, sandboxId: "" };
+    config = { ...config, sandboxId: "", ollamaBaseUrl: undefined, maxTurnsPerCycle: 2 };
+    const inference = new MockInferenceClient([
+      toolCallResponse([
+        { name: "write_file", arguments: {
+          path: "/root/work/service-offer.md", content: "too short",
+        } },
+      ]),
+      noToolResponse("I should correct the draft."),
+    ]);
+    try {
+      await runAgentLoop({ identity, config, db, conway, inference });
+      expect(inference.calls.length).toBeGreaterThanOrEqual(2);
+      const secondPrompt = JSON.stringify(inference.calls[1].messages);
+      expect(secondPrompt).toContain("deliverable must be 100 to 6000 characters");
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
   it("exec tool runs and is persisted", async () => {
