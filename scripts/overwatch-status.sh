@@ -14,7 +14,7 @@ root = pathlib.Path(sys.argv[1]).resolve()
 
 def git(*args):
     result = subprocess.run(
-        ["git", "-C", str(root), "--no-optional-locks", *args],
+        ["git", "-C", str(root), "-c", "core.fsmonitor=false", "--no-optional-locks", *args],
         capture_output=True,
         text=True,
         timeout=12,
