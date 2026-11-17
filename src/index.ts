@@ -14,6 +14,7 @@ import { provision, loadApiKeyFromConfig } from "./identity/provision.js";
 import { loadConfig, resolvePath } from "./config.js";
 import { createDatabase } from "./state/database.js";
 import { createConwayClient } from "./conway/client.js";
+import { validateWorkspaceBeforeStartup } from "./conway/local-startup.js";
 import { createInferenceClient } from "./conway/inference.js";
 import { createHeartbeatDaemon } from "./heartbeat/daemon.js";
 import {
@@ -192,6 +193,10 @@ async function run(): Promise<void> {
     const { runSetupWizard } = await import("./setup/wizard.js");
     config = await runSetupWizard();
   }
+
+  // Fail before touching wallet, persistent state or remote APIs if a local
+  // agent has no safe, explicitly approved workspace.
+  validateWorkspaceBeforeStartup(config.sandboxId, process.env.CONWAY_LOCAL_WORKSPACE_ROOT);
 
   // Load wallet (chain-aware)
   const { account, chainIdentity, chainType: walletChainType } = await getWallet();
