@@ -44,6 +44,7 @@ jobs:
             src/__tests__/local-dispatch-security.test.ts \
             src/__tests__/loop.test.ts \
             src/__tests__/host-mutation-security.test.ts \
+            src/__tests__/local-topup-guard.test.ts \
             src/__tests__/python-syntax-validator.test.ts \
             src/__tests__/agent/coding-harness.test.ts \
             src/__tests__/agent/general-harness.test.ts \
