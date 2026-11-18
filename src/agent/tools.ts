@@ -9,6 +9,8 @@ import nodePath from "node:path";
 import nodeFs from "node:fs";
 import { isValidPythonSyntax } from "./python-syntax-validator.js";
 import { requireApprovedLocalRoot } from "../conway/local-security.js";
+import { hasHostCapability } from "../conway/host-capabilities.js";
+import type { HostCapability } from "../conway/host-capabilities.js";
 import { ulid } from "ulid";
 import type {
   AutomatonTool,
@@ -3542,7 +3544,7 @@ export async function executeTool(
     "review_upstream_changes", "pull_upstream",
   ]);
   if (hostMutationTools.has(toolName) &&
-      process.env.CONWAY_HOST_MUTATION_ENABLED !== "1") {
+      !hasHostCapability(toolName as HostCapability)) {
     return {
       id: ulid(),
       name: toolName,
