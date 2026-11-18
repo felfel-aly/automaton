@@ -1,15 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  createBuiltinTools, executeTool, hasPendingLocalDrafts, LOCAL_DRAFT_QUEUE,
+  createBuiltinTools, executeTool, hasPendingLocalDrafts, activeLocalDraftQueue, LOCAL_DRAFT_QUEUE,
 } from "../agent/tools.js";
 import { createConwayClient } from "../conway/client.js";
 import { createTestConfig, createTestIdentity } from "./mocks.js";
 import type { AutomatonTool, ToolContext } from "../types.js";
 
 describe("local dispatch security invariants", () => {
+  beforeEach(() => vi.stubEnv("CONWAY_LOCAL_DRAFT_TASK", "service-demo"));
   afterEach(() => vi.unstubAllEnvs());
 
   it("checks completion in the approved physical workspace, rejecting unsafe entries", () => {
@@ -226,6 +227,66 @@ describe("local dispatch security invariants", () => {
     const result = await executeTool("install_skill", {}, [hostTool], context);
     expect(result.error).toContain("HOST_MUTATION_CAPABILITY_DISABLED");
     expect(calls).toBe(0);
+  });
+
+  it("never forces the legacy sales queue on unconfigured local tasks", () => {
+    vi.stubEnv("CONWAY_LOCAL_DRAFT_TASK", "");
+    expect(activeLocalDraftQueue()).toEqual([]);
+    expect(hasPendingLocalDrafts()).toBe(false);
+  });
+
+  it("rejects arbitrary, traversing, or duplicate reviewed filename grants", () => {
+    vi.stubEnv("CONWAY_LOCAL_DRAFT_TASK", "reviewed");
+    for (const files of [
+      '["/root/work/ok.md","/root/work/ok.md"]',
+      '["/root/work/../wallet.md"]',
+      '["/root/work/.env"]',
+      '["/root/work/ok.sh"]',
+      '[]',
+      "not-json",
+    ]) {
+      vi.stubEnv("CONWAY_LOCAL_DRAFT_FILES", files);
+      expect(() => activeLocalDraftQueue()).toThrow(/LOCAL_TASK_QUEUE_INVALID/);
+    }
+    vi.stubEnv("CONWAY_LOCAL_DRAFT_TASK", "unexpected");
+    expect(() => activeLocalDraftQueue()).toThrow(/LOCAL_TASK_MODE_NOT_APPROVED/);
+  });
+
+  it("writes only the two reviewed task documents, not the legacy sales queue", async () => {
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "conway-reviewed-queue-"));
+    const root = path.join(fixture, "approved");
+    fs.mkdirSync(root, { mode: 0o700 });
+    vi.stubEnv("CONWAY_LOCAL_WORKSPACE_ROOT", root);
+    vi.stubEnv("CONWAY_LOCAL_DRAFT_TASK", "reviewed");
+    vi.stubEnv("CONWAY_LOCAL_DRAFT_FILES",
+      JSON.stringify(["/root/work/status-brief.md", "/root/work/tests-brief.md"]));
+    const client = createConwayClient({
+      apiUrl: "https://example.invalid", apiKey: "",
+      sandboxId: "", localWorkspaceRoot: root,
+    });
+    const context = {
+      identity: { ...createTestIdentity(), sandboxId: "" },
+      config: createTestConfig({ sandboxId: "", ollamaBaseUrl: undefined }),
+      conway: client,
+    } as unknown as ToolContext;
+    const tools = createBuiltinTools("");
+    const writer = tools.find((tool) => tool.name === "write_file")!;
+    const body = "Independent, factual reviewed task status and test conditions. ".repeat(3);
+    try {
+      expect(activeLocalDraftQueue().length).toBe(2);
+      expect(hasPendingLocalDrafts()).toBe(true);
+      const blocked = await writer.execute({ path: "/root/work/service-offer.md", content: body }, context);
+      expect(blocked).toContain("not an approved local draft file");
+      const success = await writer.execute({ path: "/root/work/status-brief.md", content: body }, context);
+      expect(success).toContain("File written:");
+      expect(fs.readFileSync(path.join(root, "status-brief.md"), "utf8")).toBe(body);
+      expect(hasPendingLocalDrafts()).toBe(true);
+      const second = await writer.execute({ path: "/root/work/tests-brief.md", content: body }, context);
+      expect(second).toContain("File written:");
+      expect(hasPendingLocalDrafts()).toBe(false);
+    } finally {
+      fs.rmSync(fixture, { recursive: true, force: true });
+    }
   });
 
 });
