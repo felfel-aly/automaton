@@ -29,6 +29,8 @@ describe("Agent Loop", () => {
   let config: ReturnType<typeof createTestConfig>;
 
   beforeEach(() => {
+    // Legacy draft-loop tests explicitly exercise the legacy service-demo task.
+    vi.stubEnv("CONWAY_LOCAL_DRAFT_TASK", "service-demo");
     db = createTestDb();
     conway = new MockConwayClient();
     identity = createTestIdentity();
