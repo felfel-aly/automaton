@@ -91,7 +91,8 @@ export function activeLocalDraftQueue(): readonly string[] {
   catch { throw new Error("LOCAL_TASK_QUEUE_INVALID"); }
   if (!Array.isArray(files) || files.length < 1 || files.length > 8 ||
       files.some((value) => typeof value !== "string" ||
-        !/^\\/root\\/work\\/[a-z0-9][a-z0-9-]{0,63}\\.md$/.test(value)) ||
+        !value.startsWith("/root/work/") ||
+        !/^[a-z0-9][a-z0-9-]{0,63}[.]md$/.test(value.slice("/root/work/".length))) ||
       new Set(files).size !== files.length) {
     throw new Error("LOCAL_TASK_QUEUE_INVALID");
   }
