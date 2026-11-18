@@ -76,9 +76,28 @@ export const LOCAL_DRAFT_QUEUE = [
   "/root/work/portfolio-summary.md",
 ] as const;
 
-const LOCAL_DRAFT_NAMES = new Set(
-  LOCAL_DRAFT_QUEUE.map((filePath) => nodePath.posix.basename(filePath)),
-);
+/** A local agent may write only owner-reviewed filenames. The legacy sales
+ * demo is opt-in, never imposed on arbitrary local-mode tasks. Unconfigured
+ * mode has no file-production grant. */
+export function activeLocalDraftQueue(): readonly string[] {
+  const mode = process.env.CONWAY_LOCAL_DRAFT_TASK || "none";
+  if (mode === "none") return [];
+  if (mode === "service-demo") return LOCAL_DRAFT_QUEUE;
+  if (mode !== "reviewed") throw new Error("LOCAL_TASK_MODE_NOT_APPROVED");
+  const source = process.env.CONWAY_LOCAL_DRAFT_FILES || "";
+  if (source.length > 2048) throw new Error("LOCAL_TASK_QUEUE_TOO_LARGE");
+  let files: unknown;
+  try { files = JSON.parse(source); }
+  catch { throw new Error("LOCAL_TASK_QUEUE_INVALID"); }
+  if (!Array.isArray(files) || files.length < 1 || files.length > 8 ||
+      files.some((value) => typeof value !== "string" ||
+        !value.startsWith("/root/work/") ||
+        !/^[a-z0-9][a-z0-9-]{0,63}[.]md$/.test(value.slice("/root/work/".length))) ||
+      new Set(files).size !== files.length) {
+    throw new Error("LOCAL_TASK_QUEUE_INVALID");
+  }
+  return files as string[];
+}
 
 /**
  * Check the same approved physical root used by local write_file.
@@ -86,13 +105,15 @@ const LOCAL_DRAFT_NAMES = new Set(
  * as a completed draft.
  */
 export function hasPendingLocalDrafts(): boolean {
+  const queue = activeLocalDraftQueue();
+  if (!queue.length) return false;
   let approvedRoot: string;
   try {
     approvedRoot = requireApprovedLocalRoot(process.env.CONWAY_LOCAL_WORKSPACE_ROOT);
   } catch {
     return true;
   }
-  for (const virtualPath of LOCAL_DRAFT_QUEUE) {
+  for (const virtualPath of queue) {
     try {
       const actual = nodePath.join(approvedRoot, nodePath.posix.basename(virtualPath));
       const stat = nodeFs.lstatSync(actual);
@@ -108,6 +129,7 @@ export function hasPendingLocalDrafts(): boolean {
 }
 
 function confineLocalWorkPath(filePath: string): string | { error: string } {
+  const names = new Set(activeLocalDraftQueue().map((item) => nodePath.posix.basename(item)));
   if (typeof filePath !== "string" || !nodePath.posix.isAbsolute(filePath)) {
     return { error: "Blocked: only absolute paths under /root/work are allowed" };
   }
@@ -116,7 +138,7 @@ function confineLocalWorkPath(filePath: string): string | { error: string } {
     return { error: "Blocked: path is outside /root/work" };
   }
   const basename = normalized.slice(LOCAL_VIRTUAL_ROOT.length + 1);
-  if (basename.includes("/") || !LOCAL_DRAFT_NAMES.has(basename)) {
+  if (basename.includes("/") || !names.has(basename)) {
     return { error: "Blocked: path is not an approved local draft file" };
   }
   try {
@@ -261,7 +283,7 @@ export function createBuiltinTools(sandboxId: string): AutomatonTool[] {
           }
         }
         if (isLocalToolContext(ctx)) {
-          const workQueue = LOCAL_DRAFT_QUEUE;
+          const workQueue = activeLocalDraftQueue();
           const physicalRoot = nodePath.dirname(localTarget!);
           let expected: string | undefined;
           for (const candidate of workQueue) {
