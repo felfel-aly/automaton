@@ -47,7 +47,8 @@ jobs:
             src/__tests__/python-syntax-validator.test.ts \
             src/__tests__/agent/coding-harness.test.ts \
             src/__tests__/agent/general-harness.test.ts \
-            src/__tests__/orchestration/local-worker-security.test.ts
+            src/__tests__/orchestration/local-worker-security.test.ts \
+            src/__tests__/local-worker-identity.test.ts
           RC=$?
           set -e
           if [ $RC -eq 124 ]; then echo "::error::Test runner timed out; CI verification is incomplete"; exit 124; fi
