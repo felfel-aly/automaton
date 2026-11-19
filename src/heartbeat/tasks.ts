@@ -23,6 +23,7 @@ import { getMetrics } from "../observability/metrics.js";
 import { AlertEngine, createDefaultAlertRules } from "../observability/alerts.js";
 import { metricsInsertSnapshot, metricsPruneOld } from "../state/database.js";
 import { ulid } from "ulid";
+import { hasHostCapability } from "../conway/host-capabilities.js";
 
 const logger = createLogger("heartbeat.tasks");
 
@@ -156,6 +157,12 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
       timestamp: new Date().toISOString(),
     }));
 
+    // Empty sandbox identity selects local-only execution. Monitoring may
+    // continue, but the heartbeat must never spend funds in local mode.
+    if (!taskCtx.identity.sandboxId || !taskCtx.config.sandboxId) {
+      return { shouldWake: false };
+    }
+
     const MIN_TOPUP_USD = 5;
     if (balance >= MIN_TOPUP_USD && (ctx.survivalTier === "critical" || ctx.survivalTier === "dead")) {
       // Cooldown: don't attempt more than once every 5 minutes to avoid
@@ -277,7 +284,7 @@ export const BUILTIN_TASKS: Record<string, HeartbeatTaskFn> = {
     // Host Git fetch must be separately approved and never runs implicitly
     // in local mode, even when Ollama is not configured.
     if (!taskCtx.identity.sandboxId || !taskCtx.config.sandboxId ||
-        process.env.CONWAY_HOST_MUTATION_ENABLED !== "1") {
+        !hasHostCapability("review_upstream_changes")) {
       return { shouldWake: false };
     }
     try {
