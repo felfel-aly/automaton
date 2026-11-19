@@ -21,6 +21,7 @@ import type {
   ConwayClient,
 } from "../types.js";
 import { parseSkillMd } from "./format.js";
+import { requireHostCapability } from "../conway/host-capabilities.js";
 
 // Validation patterns to prevent injection via path/URL arguments
 const SKILL_NAME_RE = /^[a-zA-Z0-9-]+$/;
@@ -33,11 +34,6 @@ const MAX_INSTRUCTIONS_LENGTH = 10_000;
 // Skill registry operations write to host storage and may start host Git/curl.
 // They must never be triggered by an autonomous tool call without the owner's
 // explicit process-level capability grant.
-function requireHostSkillMutationApproval(): void {
-  if (process.env.CONWAY_HOST_MUTATION_ENABLED !== "1") {
-    throw new Error("Conway host skill mutation is disabled: explicit operator approval is required.");
-  }
-}
 
 /**
  * Validate that a skill path does not escape the skills directory.
@@ -71,7 +67,7 @@ export async function installSkillFromGit(
     throw new Error(`Invalid repo URL: "${repoUrl}". Must be an http(s) URL with no shell metacharacters.`);
   }
 
-  requireHostSkillMutationApproval();
+  requireHostCapability("install_skill");
   const resolvedDir = resolveHome(skillsDir);
   const targetDir = validateSkillPath(resolvedDir, name);
 
@@ -120,7 +116,7 @@ export async function installSkillFromUrl(
     throw new Error(`Invalid URL: "${url}". Must be an http(s) URL with no shell metacharacters.`);
   }
 
-  requireHostSkillMutationApproval();
+  requireHostCapability("install_skill");
   const resolvedDir = resolveHome(skillsDir);
   const targetDir = validateSkillPath(resolvedDir, name);
   const skillMdPath = path.join(targetDir, "SKILL.md");
@@ -170,7 +166,7 @@ export async function createSkill(
   const safeDescription = description.slice(0, MAX_DESCRIPTION_LENGTH);
   const safeInstructions = instructions.slice(0, MAX_INSTRUCTIONS_LENGTH);
 
-  requireHostSkillMutationApproval();
+  requireHostCapability("create_skill");
   const resolvedDir = resolveHome(skillsDir);
   const targetDir = validateSkillPath(resolvedDir, name);
 
@@ -219,7 +215,7 @@ export async function removeSkill(
     throw new Error(`Invalid skill name: "${name}". Must match ${SKILL_NAME_RE.source}`);
   }
 
-  requireHostSkillMutationApproval();
+  requireHostCapability("remove_skill");
   db.removeSkill(name);
 
   if (deleteFiles) {

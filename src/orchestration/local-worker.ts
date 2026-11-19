@@ -172,7 +172,7 @@ export class LocalWorkerPool {
   }
 }
 
-function createWorkerIdentity(
+export function createWorkerIdentity(
   parentIdentity: AutomatonIdentity,
   workerId: string,
   role: string | null,
@@ -181,6 +181,10 @@ function createWorkerIdentity(
     ...parentIdentity,
     name: `worker-${role ?? "generalist"}-${workerId.slice(-6)}`,
     address: `local://${workerId}`,
-    sandboxId: workerId,
+    // Synthetic worker IDs identify orchestration records, not remote execution.
+    // The Conway client and config remain bound to the parent's real sandbox.
+    // Assigning workerId here makes every wrapped GeneralHarness tool fail
+    // SANDBOX_ID_MISMATCH, even if execution stays in the parent sandbox.
+    sandboxId: parentIdentity.sandboxId,
   };
 }

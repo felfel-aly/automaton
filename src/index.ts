@@ -14,6 +14,7 @@ import { provision, loadApiKeyFromConfig } from "./identity/provision.js";
 import { loadConfig, resolvePath } from "./config.js";
 import { createDatabase } from "./state/database.js";
 import { createConwayClient } from "./conway/client.js";
+import { validateWorkspaceBeforeStartup } from "./conway/local-startup.js";
 import { createInferenceClient } from "./conway/inference.js";
 import { createHeartbeatDaemon } from "./heartbeat/daemon.js";
 import {
@@ -193,6 +194,10 @@ async function run(): Promise<void> {
     config = await runSetupWizard();
   }
 
+  // Fail before touching wallet, persistent state or remote APIs if a local
+  // agent has no safe, explicitly approved workspace.
+  validateWorkspaceBeforeStartup(config.sandboxId, process.env.CONWAY_LOCAL_WORKSPACE_ROOT);
+
   // Load wallet (chain-aware)
   const { account, chainIdentity, chainType: walletChainType } = await getWallet();
   const resolvedChainType = config.chainType || walletChainType || "evm";
@@ -336,8 +341,9 @@ async function run(): Promise<void> {
     logger.warn(`[${new Date().toISOString()}] State repo init failed: ${err.message}`);
   }
 
-  // Bootstrap topup: buy minimum credits ($5) from USDC so the agent can start.
-  // The agent decides larger topups itself via the topup_credits tool.
+  // Local execution is offline-only: never purchase compute at startup.
+  // Remote sandboxes retain their previous explicit bootstrap behavior.
+  if (config.sandboxId) {
   try {
     let bootstrapTimer: ReturnType<typeof setTimeout>;
     const bootstrapTimeout = new Promise<null>((_, reject) => {
@@ -366,6 +372,7 @@ async function run(): Promise<void> {
     }
   } catch (err: any) {
     logger.warn(`[${new Date().toISOString()}] Bootstrap topup skipped: ${err.message}`);
+  }
   }
 
   // Start heartbeat daemon (Phase 1.1: DurableScheduler)

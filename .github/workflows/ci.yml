@@ -16,6 +16,8 @@ jobs:
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
+      - name: Verify read-only status cannot execute Git fsmonitor
+        run: python3 scripts/test_overwatch_status.py
       - name: Run tests
         timeout-minutes: 10
         run: |
@@ -41,13 +43,16 @@ jobs:
             src/__tests__/skills-hardening.test.ts \
             src/__tests__/financial.test.ts \
             src/__tests__/conway-local-security.test.ts \
+            src/__tests__/local-startup-workspace.test.ts \
             src/__tests__/local-dispatch-security.test.ts \
             src/__tests__/loop.test.ts \
             src/__tests__/host-mutation-security.test.ts \
+            src/__tests__/local-topup-guard.test.ts \
             src/__tests__/python-syntax-validator.test.ts \
             src/__tests__/agent/coding-harness.test.ts \
             src/__tests__/agent/general-harness.test.ts \
-            src/__tests__/orchestration/local-worker-security.test.ts
+            src/__tests__/orchestration/local-worker-security.test.ts \
+            src/__tests__/local-worker-identity.test.ts
           RC=$?
           set -e
           if [ $RC -eq 124 ]; then echo "::error::Test runner timed out; CI verification is incomplete"; exit 124; fi
